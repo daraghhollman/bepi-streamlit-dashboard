@@ -1,0 +1,13 @@
+[project]
+name = "bepi-region-prediction-dashboard"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "netcdf4>=1.7.4",
+    "plotly>=6.9.0",
+    "scipy>=1.18.0",
+    "streamlit[charts]>=1.60.0",
+    "xarray>=2026.7.0",
+]
