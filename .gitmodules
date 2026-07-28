@@ -1,0 +1,4 @@
+[submodule "data/spice"]
+	path = data/spice
+	url = https://spiftp.esac.esa.int/git/bepicolombo.git
+	shallow = true
