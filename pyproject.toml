@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "bepi-region-prediction",
     "hermpy>=0.2.7",
     "netcdf4>=1.7.4",
     "planetary-coverage>=1.2.1",
@@ -14,3 +15,11 @@ dependencies = [
     "streamlit[charts]>=1.60.0",
     "xarray>=2026.7.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "bepi-region-prediction",
+]
+
+[tool.uv.sources]
+bepi-region-prediction = { workspace = true, editable = true }

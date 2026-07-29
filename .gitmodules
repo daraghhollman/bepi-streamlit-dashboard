@@ -2,3 +2,6 @@
 	path = data/spice
 	url = https://spiftp.esac.esa.int/git/bepicolombo.git
 	shallow = true
+[submodule "bepi-region-prediction"]
+	path = bepi-region-prediction
+	url = git@github.com:daraghhollman/bepi-region-prediction.git

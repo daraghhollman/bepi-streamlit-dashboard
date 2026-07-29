@@ -1,9 +1,11 @@
 import datetime as dt
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Literal
+from typing import List, Literal, Tuple
 
 import astropy.units as u
 import matplotlib
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import planetary_coverage as pc
@@ -12,10 +14,14 @@ import streamlit as st
 import xarray as xr
 from astropy.table import QTable
 from astropy.time import Time
+from get_probabilities import get_probability_at_position
 from hermpy.data import rotate_to_aberrated_coordinates
+from hermpy.plotting import plot_magnetospheric_boundaries
 from hermpy.utils import Constants
 from matplotlib.axes import Axes
-from matplotlib.dates import DateFormatter, HourLocator
+from matplotlib.collections import LineCollection
+from matplotlib.dates import DateFormatter, HourLocator, date2num, num2date
+from matplotlib.patches import Circle, Rectangle
 
 BLACK = "#000000"
 RED = "#D55E00"
@@ -29,19 +35,8 @@ ORANGE = "#E69F00"
 
 def run():
 
-    map_selection: str = st.selectbox(
-        "Source crossings list",
-        ("Hollman+ 2026", "Philpott+ 2020"),
-    )
-
-    with st.container(border=True, horizontal=True):
-        density_selection: int = st.slider("Smoothness", 1, 10, 1)
-        something_else: int = st.slider("Cool Factor", 1, 9000, 9000)
-
-    maps = load_probability_maps(author=map_selection)
-    maps = process_probability_maps(
-        maps, author=map_selection, grid_density=density_selection
-    )
+    maps = load_probability_maps(author="Hollman+ 2026")
+    maps = process_probability_maps(maps, author="Hollman+ 2026")
     plot_probability_maps(maps)
 
     # Set some default times
@@ -66,16 +61,26 @@ def run():
         st.button("◀", help="Previous", on_click=shift_range, args=(-1,))
         st.button("▶", help="Next", on_click=shift_range, args=(1,))
 
-    mpo_positions = get_positions(start_time, end_time, "MPO")
-    mpo_probabilities = get_probabilities(mpo_positions, maps)
+    with st.container(border=True, horizontal=True):
+        smoothing: int = st.slider("Smooth Factor", 1, 20, 10)
+        something_else: int = st.slider("Cool Factor", 1, 9000, 9000)
 
     mio_positions = get_positions(start_time, end_time, "Mio")
-    mio_probabilities = get_probabilities(mio_positions, maps)
+    mpo_positions = get_positions(start_time, end_time, "MPO")
 
-    plot_probabilities(mpo_probabilities, mio_probabilities)
+    mio_probabilities = get_probability_at_position(mio_positions, maps)
+    mpo_probabilities = get_probability_at_position(mpo_positions, maps)
+
+    plot_probabilities(
+        mpo_positions["UTC"].to_datetime(),
+        mpo_probabilities,
+        mio_probabilities,
+        mpo_positions,
+        mio_positions,
+        smooth_factor=smoothing,
+    )
 
 
-@st.cache_resource
 def load_probability_maps(
     author: Literal["Hollman+ 2026", "Philpott+ 2020"],
 ) -> xr.Dataset:
@@ -93,7 +98,6 @@ def load_probability_maps(
     return probability_map
 
 
-@st.cache_resource()
 def process_probability_maps(
     _data: xr.Dataset,  # The underscore prefix means that this var is ignored in hashing
     # We include author to help with caching as it is hashable
@@ -102,30 +106,28 @@ def process_probability_maps(
 ) -> xr.Dataset:
 
     # Interpolate if grid_density is not one
-    bin_size = _data.coords["X"][1] - _data.coords["X"][0]
+    bin_size = _data.coords["X MSM'"][1] - _data.coords["X MSM'"][0]
 
     new_x_coords = np.arange(
-        _data.coords["X"][0],
-        _data.coords["X"][-1] + bin_size / grid_density,
+        _data.coords["X MSM'"][0],
+        _data.coords["X MSM'"][-1] + bin_size / grid_density,
         bin_size / grid_density,
     )
     new_cyl_coords = np.arange(
-        _data.coords["CYL"][0],
-        _data.coords["CYL"][-1] + bin_size / grid_density,
+        _data.coords["CYL MSM'"][0],
+        _data.coords["CYL MSM'"][-1] + bin_size / grid_density,
         bin_size / grid_density,
     )
 
-    data = _data.interp(coords={"X": new_x_coords, "CYL": new_cyl_coords})
+    data = _data.interp(coords={"X MSM'": new_x_coords, "CYL MSM'": new_cyl_coords})
 
     return data
 
 
-def plot_probability_maps(data: xr.Dataset) -> None:
+def plot_probability_maps(probability_maps: xr.Dataset) -> None:
 
-    # Selected probability map figure
-    regions = ["Solar Wind", "Magnetosheath", "Magnetosphere"]
+    fig, axes = plt.subplots(1, 4, sharex=True, sharey=True, figsize=(10, 4))
 
-    fig, axes = plt.subplots(1, 4, figsize=(6, 2), width_ratios=[1] * 3 + [0.05])
     fig.patch.set_facecolor("none")
 
     # Update plot theming based on light/dark mode
@@ -136,44 +138,156 @@ def plot_probability_maps(data: xr.Dataset) -> None:
     matplotlib.rcParams["ytick.color"] = text_colour
     matplotlib.rcParams["axes.edgecolor"] = text_colour
 
-    for i, region in enumerate(regions):
+    residence_data = probability_maps["Minutes In Bin"] / 60
 
-        ax: Axes = axes[i]
+    # Plot residence time using a log scale to show both low and high coverage areas
+    residence_mesh = axes[0].pcolormesh(
+        residence_data.coords["X MSM'"],
+        residence_data.coords["CYL MSM'"],
+        residence_data.values.T,
+        cmap="viridis",
+        norm="log",
+    )
 
-        region_map = data[f"{region.replace(' ', '_').lower()}_mean"].T
+    axes[0].set_facecolor("none")
 
-        region_map.values[np.where(region_map.values == 0)] = np.nan
+    # Create a mask showing where the spacecraft has any residence time at all
+    residence_mask = residence_data.values.T != 0
 
+    # Configure residence panel
+    axes[0].set_title("MESSENGER\nResidence")
+
+    # Add a colorbar below the residence panel
+    cbar_bounds = [0, -0.6, 1, 0.1]
+    cbar_ax = axes[0].inset_axes(cbar_bounds)
+    plt.colorbar(
+        residence_mesh,
+        cax=cbar_ax,
+        location="bottom",
+        label="Time Spent [hours]",
+    )
+
+    # Y-axis label for the first panel only
+    axes[0].set_ylabel(
+        r"$\left(Y_{\rm MSM'}^2 + Z_{\rm MSM'}^2 \right)^{0.5}\quad \left[ R_{\rm M} \right]$"
+    )
+
+    regions = ["Solar Wind", "Magnetosheath", "Magnetosphere"]
+
+    for i, ax in enumerate(axes[1:]):
+        # Select region probability map
+        map_data = probability_maps[regions[i]]
+
+        # Hide zeros so unobserved regions don't appear as true 0 probability
+        map_data.values[np.where(map_data.values == 0)] = np.nan
+
+        # Plot region probability (0 to 1)
         mesh = ax.pcolormesh(
-            region_map.coords["X"],
-            region_map.coords["CYL"],
-            region_map.values,
-            cmap="grey",
+            map_data.coords["X MSM'"],
+            map_data.coords["CYL MSM'"],
+            map_data.values.T,
+            vmax=1,
+            cmap="magma",
         )
 
-        ax.set_xlabel(r"$X_{\rm MSM'} \quad \left[ \text{R}_\text{M} \right]$")
+        # Draw the outline of MESSENGER residence coverage
+        ax.contour(
+            map_data.coords["X MSM'"],
+            map_data.coords["CYL MSM'"],
+            residence_mask,
+            levels=[0.5],
+            antialiased=False,
+            colors="grey",
+            zorder=-1,
+        )
 
-        if i == 0:
-            ax.set_ylabel(
-                r"$\left( Y_{\text{MSM'}}^2 + Z_{\text{MSM'}}^2 \right)^{0.5} \quad \left[ \text{R}_\text{M} \right]$"
+        # Shade outside residence coverage in light grey
+        ax.contourf(
+            map_data.coords["X MSM'"],
+            map_data.coords["CYL MSM'"],
+            residence_mask,
+            levels=[0, 0.5, 1],
+            colors=["none", "lightgrey"],
+            zorder=-2,
+        )
+
+        ax.set_facecolor("none")
+
+        # Title each region panel
+        ax.set_title(regions[i])
+
+        # Add a shared region probability colorbar under the middle region panel
+        if i == 1:
+            cbar_bounds = [-1.2, -0.6, 3.4, 0.1]
+            cbar_ax = ax.inset_axes(cbar_bounds)
+            plt.colorbar(
+                mesh,
+                cax=cbar_ax,
+                location="bottom",
+                label="Relative Region Occurence",
             )
 
-        else:
-            ax.set_yticklabels([])
+    # ----------------------------
+    # Shared axis formatting
+    # ----------------------------
 
-        if i == 2:
-            fig.colorbar(mesh, cax=axes[-1], label="Observation Probability")
+    labels = ["a", "b", "c", "d"]
 
-        ax.set_facecolor("lightgrey")
+    for i, ax in enumerate(axes):
+        # Ensure equal scaling for x/y to preserve geometry
         ax.set_aspect("equal")
 
+        # Set consistent axis limits across all panels
         ax.set_xlim(-5, 5)
-        ax.set_ylim(0, 10)
+        ax.set_ylim(0, 8)
+
+        # Shared x-axis label
+        ax.set_xlabel(r"$X_{\rm MSM'} \quad \left[ R_{\rm M} \right]$")
+
+        # Draw Mercury boundaries (north/south extent) using alternating circle segments
+        mercury_params = {"segments": 30, "linewidth": 1.5}
+
+        draw_alternating_circle(
+            (0, Constants.DIPOLE_OFFSET / Constants.MERCURY_RADIUS),
+            1,
+            ax,
+            **mercury_params,
+        )
+        draw_alternating_circle(
+            (0, -(Constants.DIPOLE_OFFSET / Constants.MERCURY_RADIUS)),
+            1,
+            ax,
+            **mercury_params,
+        )
+
+        # Add panel label in axes coordinates
+        ax.text(0.02, 0.9, f"({labels[i]})", transform=ax.transAxes)
+
+    # ----------------------------
+    # Custom legend
+    # ----------------------------
+
+    custom_handles = [
+        CurvedLegendHandle(angle=180),
+        Rectangle((0, 0), 1, 1, facecolor="lightgrey", edgecolor="grey"),
+    ]
+
+    fig.legend(
+        custom_handles,
+        ["Mercury (northern and southern extent)", "MESSENGER Residence Bounds"],
+        loc="upper center",
+        ncol=1,
+        frameon=False,
+        handler_map={CurvedLegendHandle: custom_handles[0]},
+        bbox_to_anchor=(0.6, 0.95),
+    )
+
+    # Adjust spacing and save
+    fig.subplots_adjust(left=0.08, right=0.95, bottom=0.2)
 
     st.pyplot(fig)
 
 
-@st.cache_data()
 def get_positions(
     start: dt.datetime,
     end: dt.datetime,
@@ -220,62 +334,33 @@ def get_positions(
         return positions_table[["UTC", "X MSM'", "Y MSM'", "Z MSM'"]]
 
 
-def get_probabilities(
-    positions: QTable, probability_maps: xr.Dataset
-) -> Dict[str, List[float]]:
+@dataclass
+class RegionProbabilities:
+    mean: List[float]
+    upper: List[float]
+    lower: List[float]
 
-    x_data = positions["X MSM'"].value
-    cyl_data = np.sqrt(positions["Y MSM'"] ** 2 + positions["Z MSM'"] ** 2).value
 
-    regions = ["Solar Wind", "Magnetosheath", "Magnetosphere"]
-
-    trajectory_probabilities = {
-        region: np.zeros_like(x_data, dtype=float) for region in regions
-    }
-
-    bin_size = probability_maps.coords["X"][1] - probability_maps.coords["X"][0]
-
-    x_coords = probability_maps.coords["X"].values
-    cyl_coords = probability_maps.coords["CYL"].values
-
-    # Create bin edges (add one extra edge at the end for np.digitize)
-    # Resolves floating point precision issues
-    x_bins = np.concatenate([x_coords, [x_coords[-1] + bin_size]])
-    cyl_bins = np.concatenate([cyl_coords, [cyl_coords[-1] + bin_size]])
-
-    # Digitize the trajectory data into bin indices
-    x_indices = np.digitize(x_data, x_bins) - 1
-    cyl_indices = np.digitize(cyl_data, cyl_bins) - 1
-
-    # Iterate over trajectory points and assign probabilities
-    for i in range(len(x_data)):
-        x_index = x_indices[i]
-        cyl_index = cyl_indices[i]
-
-        # Ensure the index is within the valid histogram range
-        if 0 <= x_index < len(x_bins) - 1 and 0 <= cyl_index < len(cyl_bins) - 1:
-            for region in regions:
-                trajectory_probabilities[region][i] = probability_maps[
-                    f"{region.replace(' ', '_').lower()}_mean"
-                ][x_index, cyl_index]
-
-        else:
-            for region in regions:
-                trajectory_probabilities[region][
-                    i
-                ] = np.nan  # Assign NaN if out of bounds
-
-    trajectory_probabilities["UTC"] = positions["UTC"].to_datetime()
-
-    return trajectory_probabilities
+@dataclass
+class TrajectoryProbabilities:
+    regions: List[str]
+    probabilities: List[RegionProbabilities]
 
 
 def plot_probabilities(
-    mpo_probabilities: Dict[List[float]], mio_probabilities: Dict[List[float]]
+    time: List[dt.datetime],
+    mpo_probabilities: Tuple[List[List[float]], List[List[float]], List[List[float]]],
+    mio_probabilities: Tuple[List[List[float]], List[List[float]], List[List[float]]],
+    mpo_positions: QTable,
+    mio_positions: QTable,
+    smooth_factor: int = 1,
 ) -> None:
 
-    fig, axes = plt.subplots(2, 1, figsize=(6, 4), sharex=True)
+    fig, axes = plt.subplots(2, 2, width_ratios=[3, 1], figsize=(10, 6), sharex="col")
     fig.patch.set_facecolor("none")
+
+    for ax in axes.flatten():
+        ax.set_facecolor("none")
 
     # Update plot theming based on light/dark mode
     text_colour = "black" if st.context.theme.type == "light" else "white"
@@ -288,63 +373,95 @@ def plot_probabilities(
     matplotlib.rcParams["legend.facecolor"] = "none"
     matplotlib.rcParams["legend.edgecolor"] = "none"
 
-    ax = axes[0]
-    ax: Axes
+    regions = ["Solar Wind", "Magnetosheath", "Magnetosphere"]
+    colours = [YELLOW, ORANGE, LIGHTBLUE]
 
-    ax.plot(
-        mio_probabilities["UTC"],
-        mio_probabilities["Solar Wind"],
-        color=YELLOW,
-        label="Solar Wind",
-    )
-    ax.plot(
-        mio_probabilities["UTC"],
-        mio_probabilities["Magnetosheath"],
-        color=ORANGE,
-        label="Magnetosheath",
-    )
-    ax.plot(
-        mio_probabilities["UTC"],
-        mio_probabilities["Magnetosphere"],
-        color=LIGHTBLUE,
-        label="Magnetosphere",
-    )
+    def moving_average(data, window_size):
+        weights = np.ones(window_size) / window_size
 
-    ax.set_ylabel("Mio\nRegion Probabilities")
+        return np.convolve(data, weights, mode="valid")
 
-    ax.legend(loc="upper center", ncols=3, bbox_to_anchor=(0.5, 1.25))
+    time = num2date(moving_average(date2num(time), smooth_factor))
 
-    ax = axes[1]
-    ax: Axes
+    for i, region in enumerate(regions):
 
-    ax.plot(
-        mpo_probabilities["UTC"],
-        mpo_probabilities["Solar Wind"],
-        color=YELLOW,
-        label="Solar Wind",
+        for j, probabilities in enumerate([mio_probabilities, mpo_probabilities]):
+
+            mean = moving_average(probabilities[0][i], smooth_factor)
+            lower = moving_average(probabilities[1][i], smooth_factor)
+            upper = moving_average(probabilities[2][i], smooth_factor)
+
+            axes[j, 0].plot(time, mean, color=colours[i], label=f"P({region})")
+
+            axes[j, 0].fill_between(
+                time,
+                lower,
+                upper,
+                color=colours[i],
+                alpha=0.3,
+            )
+
+    mio_positions["CYL MSM'"] = np.sqrt(
+        mio_positions["Y MSM'"] ** 2 + mio_positions["Z MSM'"] ** 2
     )
-    ax.plot(
-        mpo_probabilities["UTC"],
-        mpo_probabilities["Magnetosheath"],
-        color=ORANGE,
-        label="Magnetosheath",
-    )
-    ax.plot(
-        mpo_probabilities["UTC"],
-        mpo_probabilities["Magnetosphere"],
-        color=LIGHTBLUE,
-        label="Magnetosphere",
+    mpo_positions["CYL MSM'"] = np.sqrt(
+        mpo_positions["Y MSM'"] ** 2 + mpo_positions["Z MSM'"] ** 2
     )
 
-    ax.set_xlabel("UTC")
-    ax.set_ylabel("MPO\nRegion Probabilities")
+    axes[0, 1].plot(
+        mio_positions["X MSM'"], mio_positions["CYL MSM'"], color=text_colour
+    )
+    axes[1, 1].plot(
+        mpo_positions["X MSM'"], mpo_positions["CYL MSM'"], color=text_colour
+    )
 
-    for ax in axes:
-        ax.patch.set_facecolor("none")
+    axes[1, 1].set_xlabel(r"$X_{\rm MSM'} \quad \left[ R_{\rm M} \right]$")
+
+    axes[0, 0].set_ylabel("Mio\nRegion Probability")
+    axes[1, 0].set_ylabel("MPO\nRegion Probability")
+
+    for ax in axes[:, 0]:
+        ax: Axes
+
         ax.margins(x=0)
 
         ax.xaxis.set_major_formatter(DateFormatter("%Y-%m-%d\n%H:%M"))
         ax.xaxis.set_major_locator(HourLocator(byhour=[0, 6, 12, 18]))
+
+    for ax in axes[:, 1]:
+
+        plot_magnetospheric_boundaries(ax, color=text_colour)
+
+        ax.set_ylabel(
+            r"$\left( Y_{\rm MSM'}^2 + Z_{\rm MSM'}^2 \right)^{0.5} \quad \left[ R_{\rm M} \right]$"
+        )
+
+        ax.set_aspect("equal")
+
+        ax.set_xlim(-5, 5)
+        ax.set_ylim(0, 8)
+
+        # Add Mercury
+        circle = Circle(
+            (0, Constants.DIPOLE_OFFSET / Constants.MERCURY_RADIUS),
+            1,
+            edgecolor="grey",
+            facecolor="none",
+            linewidth=2,
+            zorder=-5,
+        )
+        ax.add_patch(circle)
+        circle = Circle(
+            (0, -1 * Constants.DIPOLE_OFFSET / Constants.MERCURY_RADIUS),
+            1,
+            edgecolor="grey",
+            facecolor="none",
+            linewidth=2,
+            zorder=-5,
+        )
+        ax.add_patch(circle)
+
+    axes[0, 0].legend(loc="upper center", ncols=3, bbox_to_anchor=(0.5, 1.3))
 
     st.pyplot(fig)
 
@@ -354,6 +471,106 @@ def shift_range(direction):
     delta = direction * span
     st.session_state.start_time += delta
     st.session_state.end_time += delta
+
+
+def draw_alternating_circle(center, radius, ax, segments=200, linewidth=3, **kwargs):
+    """
+    Draw a circle on a Matplotlib axis using alternating black/white line segments.
+
+    This is used to visually represent Mercury's boundary with a distinctive
+    alternating pattern.
+
+    Parameters
+    ----------
+    center : tuple[float, float]
+        (x, y) center of the circle in data coordinates.
+    radius : float
+        Circle radius in data units.
+    ax : matplotlib.axes.Axes
+        Axis to draw onto.
+    segments : int, default=200
+        Number of segments used to approximate the circle. More segments gives
+        a smoother circle.
+    linewidth : float, default=3
+        Width of the circle segments.
+    **kwargs
+        Additional keyword arguments passed to `matplotlib.collections.LineCollection`.
+    """
+    x0, y0 = center
+
+    theta = np.linspace(0, 2 * np.pi, segments)
+    x = x0 + radius * np.cos(theta)
+    y = y0 + radius * np.sin(theta)
+
+    points = np.column_stack((x, y))
+    segments_list = np.stack([points[:-1], points[1:]], axis=1)
+
+    colors = ["black" if i % 2 == 0 else "white" for i in range(len(segments_list))]
+
+    lc = LineCollection(segments_list, colors=colors, linewidths=linewidth, **kwargs)
+    ax.add_collection(lc)
+
+
+class CurvedLegendHandle:
+    """
+    Custom legend handle that draws a curved arc symbol inside a Matplotlib legend.
+
+    This is used to create a legend entry representing the curved Mercury boundary
+    marker drawn in the panels.
+    """
+
+    def __init__(self, angle=180):
+        """
+        Parameters
+        ----------
+        angle : float, default=180
+            Reserved for potential customization of the arc curvature/extent.
+            (Currently the arc is drawn from 0 to 180 degrees.)
+        """
+        self.angle = angle
+
+    def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+        """
+        Matplotlib hook to draw the custom legend artist.
+
+        Returns
+        -------
+        matplotlib.patches.Arc
+            The arc artist added to the legend handle box.
+        """
+        w, h = handlebox.width, handlebox.height
+        x, y = handlebox.xdescent, handlebox.ydescent
+
+        arc = mpatches.Arc(
+            (x + w / 2, y + h / 2),
+            w,
+            h * 2,
+            angle=0,
+            theta1=0,
+            theta2=180,
+            lw=2,
+            ls=(0, (2, 2)),
+            color="black",
+            transform=handlebox.get_transform(),
+        )
+
+        handlebox.add_artist(arc)
+
+        arc = mpatches.Arc(
+            (x + w / 2, y + h / 2),
+            w,
+            h * 2,
+            angle=0,
+            theta1=0,
+            theta2=180,
+            lw=2,
+            ls=(2, (2, 2)),
+            color="white",
+            transform=handlebox.get_transform(),
+        )
+
+        handlebox.add_artist(arc)
+        return arc
 
 
 run()
