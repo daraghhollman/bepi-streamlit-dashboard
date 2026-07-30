@@ -1,7 +1,7 @@
 import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple
 
 import astropy.units as u
 import matplotlib
@@ -9,6 +9,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import planetary_coverage as pc
+import polars as pl
 import spiceypy as spice
 import streamlit as st
 import xarray as xr
@@ -67,7 +68,7 @@ def run():
     mio_probabilities = get_probability_at_position(mio_positions, maps)
     mpo_probabilities = get_probability_at_position(mpo_positions, maps)
 
-    plot_probabilities(
+    probabilities_dict = plot_probabilities(
         mpo_positions["UTC"].to_datetime(),
         mpo_probabilities,
         mio_probabilities,
@@ -75,6 +76,48 @@ def run():
         mio_positions,
         smooth_factor=smoothing,
     )
+
+    _, middle, _ = st.columns(3)
+    middle.download_button(
+        "Download Predictions",
+        data=download_predictions(mio_positions, mpo_positions, probabilities_dict),
+        help="Downloads predictions for Mio and MPO",
+        file_name="region-predictions.csv",
+        type="primary",
+        icon=":material/download:",
+    )
+
+
+def download_predictions(
+    mio_positions: QTable, mpo_positions: QTable, probabilities_dict: Dict[str, List]
+) -> None:
+
+    utc = mio_positions["UTC"].to_datetime().tolist()
+
+    positions_df = pl.DataFrame(
+        {
+            "UTC": pl.Series("UTC", utc, dtype=pl.Datetime("us", "UTC")),
+            "Mio X MSM' [radii]": mio_positions["X MSM'"],
+            "Mio Y MSM' [radii]": mio_positions["Y MSM'"],
+            "Mio Z MSM' [radii]": mio_positions["Z MSM'"],
+            "Mio CYL MSM' [radii]": mio_positions["CYL MSM'"],
+            "MPO X MSM' [radii]": mpo_positions["X MSM'"],
+            "MPO Y MSM' [radii]": mpo_positions["Y MSM'"],
+            "MPO Z MSM' [radii]": mpo_positions["Z MSM'"],
+            "MPO CYL MSM' [radii]": mpo_positions["CYL MSM'"],
+        }
+    )
+
+    probabilities_df = pl.DataFrame(
+        {
+            "UTC": probabilities_dict.pop("UTC"),
+            **probabilities_dict,
+        }
+    )
+
+    df = probabilities_df.join_asof(positions_df, on="UTC")
+
+    return df.write_csv(datetime_format="%Y-%m-%d %H:%M:%S")
 
 
 @st.cache_resource
@@ -333,7 +376,7 @@ def plot_probabilities(
     mpo_positions: QTable,
     mio_positions: QTable,
     smooth_factor: int = 1,
-) -> None:
+) -> Dict:
 
     fig, axes = plt.subplots(2, 2, width_ratios=[3, 1], figsize=(10, 6), sharex="col")
     fig.patch.set_facecolor("none")
@@ -348,30 +391,32 @@ def plot_probabilities(
     matplotlib.rcParams["xtick.color"] = text_colour
     matplotlib.rcParams["ytick.color"] = text_colour
     matplotlib.rcParams["axes.edgecolor"] = text_colour
-
     matplotlib.rcParams["legend.facecolor"] = "none"
     matplotlib.rcParams["legend.edgecolor"] = "none"
 
     regions = ["Solar Wind", "Magnetosheath", "Magnetosphere"]
+    region_abbreviations = {
+        "Solar Wind": "SW",
+        "Magnetosheath": "MSH",
+        "Magnetosphere": "MSP",
+    }
     colours = [YELLOW, ORANGE, LIGHTBLUE]
 
     def moving_average(data, window_size):
         weights = np.ones(window_size) / window_size
-
         return np.convolve(data, weights, mode="valid")
 
     time = num2date(moving_average(date2num(time), smooth_factor))
 
+    results = {}
+    dataset_names = ["Mio", "MPO"]
     for i, region in enumerate(regions):
-
         for j, probabilities in enumerate([mio_probabilities, mpo_probabilities]):
-
             mean = moving_average(probabilities[0][i], smooth_factor)
             lower = moving_average(probabilities[1][i], smooth_factor)
             upper = moving_average(probabilities[2][i], smooth_factor)
 
             axes[j, 0].plot(time, mean, color=colours[i], label=f"P({region})")
-
             axes[j, 0].fill_between(
                 time,
                 lower,
@@ -380,13 +425,20 @@ def plot_probabilities(
                 alpha=0.3,
             )
 
+            # Add smoothed values to dictionary
+            abbr = region_abbreviations[region]
+            key_base = f"{dataset_names[j]} P({abbr})"
+
+            results[key_base] = mean
+            results[f"{key_base} 95% Upper"] = upper
+            results[f"{key_base} 95% Lower"] = lower
+
     mio_positions["CYL MSM'"] = np.sqrt(
         mio_positions["Y MSM'"] ** 2 + mio_positions["Z MSM'"] ** 2
     )
     mpo_positions["CYL MSM'"] = np.sqrt(
         mpo_positions["Y MSM'"] ** 2 + mpo_positions["Z MSM'"] ** 2
     )
-
     axes[0, 1].plot(
         mio_positions["X MSM'"], mio_positions["CYL MSM'"], color=text_colour
     )
@@ -395,28 +447,22 @@ def plot_probabilities(
     )
 
     axes[1, 1].set_xlabel(r"$X_{\rm MSM'} \quad \left[ R_{\rm M} \right]$")
-
     axes[0, 0].set_ylabel("Mio\nRegion Probability")
     axes[1, 0].set_ylabel("MPO\nRegion Probability")
 
     for ax in axes[:, 0]:
         ax: Axes
-
         ax.margins(x=0)
-
         ax.xaxis.set_major_formatter(DateFormatter("%Y-%m-%d\n%H:%M"))
         ax.xaxis.set_major_locator(HourLocator(byhour=[0, 6, 12, 18]))
 
     for ax in axes[:, 1]:
-
         plot_magnetospheric_boundaries(ax, color=text_colour)
-
         ax.set_ylabel(
             r"$\left( Y_{\rm MSM'}^2 + Z_{\rm MSM'}^2 \right)^{0.5} \quad \left[ R_{\rm M} \right]$"
         )
 
         ax.set_aspect("equal")
-
         ax.set_xlim(-5, 5)
         ax.set_ylim(0, 8)
 
@@ -444,6 +490,10 @@ def plot_probabilities(
 
     st.pyplot(fig)
     plt.close(fig)
+
+    results["UTC"] = time
+
+    return results
 
 
 def shift_range(direction):

@@ -10,6 +10,7 @@ dependencies = [
     "netcdf4>=1.7.4",
     "planetary-coverage>=1.2.1",
     "plotly>=6.9.0",
+    "polars>=1.43.1",
     "scipy>=1.18.0",
     "spiceypy>=8.2.0",
     "streamlit[charts]>=1.60.0",
