@@ -36,7 +36,6 @@ ORANGE = "#E69F00"
 def run():
 
     maps = load_probability_maps(author="Hollman+ 2026")
-    maps = process_probability_maps(maps, author="Hollman+ 2026")
     plot_probability_maps(maps)
 
     # Set some default times
@@ -61,12 +60,9 @@ def run():
         st.button("◀", help="Previous", on_click=shift_range, args=(-1,))
         st.button("▶", help="Next", on_click=shift_range, args=(1,))
 
-    with st.container(border=True, horizontal=True):
-        smoothing: int = st.slider("Smooth Factor", 1, 20, 10)
-        something_else: int = st.slider("Cool Factor", 1, 9000, 9000)
+    smoothing: int = st.slider("Smooth Factor", 1, 20, 10)
 
-    mio_positions = get_positions(start_time, end_time, "Mio")
-    mpo_positions = get_positions(start_time, end_time, "MPO")
+    mio_positions, mpo_positions = get_positions(start_time, end_time)
 
     mio_probabilities = get_probability_at_position(mio_positions, maps)
     mpo_probabilities = get_probability_at_position(mpo_positions, maps)
@@ -81,6 +77,7 @@ def run():
     )
 
 
+@st.cache_resource
 def load_probability_maps(
     author: Literal["Hollman+ 2026", "Philpott+ 2020"],
 ) -> xr.Dataset:
@@ -96,32 +93,6 @@ def load_probability_maps(
             raise ValueError(f"No valid author: {author}")
 
     return probability_map
-
-
-def process_probability_maps(
-    _data: xr.Dataset,  # The underscore prefix means that this var is ignored in hashing
-    # We include author to help with caching as it is hashable
-    author: Literal["Hollman+ 2026", "Philpott+ 2020"],
-    grid_density: float = 1,
-) -> xr.Dataset:
-
-    # Interpolate if grid_density is not one
-    bin_size = _data.coords["X MSM'"][1] - _data.coords["X MSM'"][0]
-
-    new_x_coords = np.arange(
-        _data.coords["X MSM'"][0],
-        _data.coords["X MSM'"][-1] + bin_size / grid_density,
-        bin_size / grid_density,
-    )
-    new_cyl_coords = np.arange(
-        _data.coords["CYL MSM'"][0],
-        _data.coords["CYL MSM'"][-1] + bin_size / grid_density,
-        bin_size / grid_density,
-    )
-
-    data = _data.interp(coords={"X MSM'": new_x_coords, "CYL MSM'": new_cyl_coords})
-
-    return data
 
 
 def plot_probability_maps(probability_maps: xr.Dataset) -> None:
@@ -179,7 +150,7 @@ def plot_probability_maps(probability_maps: xr.Dataset) -> None:
         map_data = probability_maps[regions[i]]
 
         # Hide zeros so unobserved regions don't appear as true 0 probability
-        map_data.values[np.where(map_data.values == 0)] = np.nan
+        map_data.values[map_data.values == 0] = np.nan
 
         # Plot region probability (0 to 1)
         mesh = ax.pcolormesh(
@@ -286,17 +257,20 @@ def plot_probability_maps(probability_maps: xr.Dataset) -> None:
     fig.subplots_adjust(left=0.08, right=0.95, bottom=0.2)
 
     st.pyplot(fig)
+    plt.close(fig)
 
 
+@st.cache_data
 def get_positions(
     start: dt.datetime,
     end: dt.datetime,
-    spacecraft: Literal["MPO", "Mio"],
-) -> QTable:
+) -> Tuple[QTable, QTable]:
 
     kernels_dir = Path("./data/spice/kernels/")
     metakernel_path = kernels_dir / "mk" / "bc_plan.tm"
     mk = pc.MetaKernel(metakernel_path, kernels=kernels_dir)
+
+    tables: List[QTable] = []
 
     with spice.KernelPool(mk):
         resolution = dt.timedelta(minutes=1)
@@ -305,33 +279,38 @@ def get_positions(
         ]
         ets = spice.datetime2et(times)
 
-        positions, _ = spice.spkpos(
-            spacecraft,
-            ets,
-            "BC_MSO",
-            "NONE",
-            "MERCURY",
-        )
+        for spacecraft in ["Mio", "MPO"]:
+            positions, _ = spice.spkpos(
+                spacecraft,
+                ets,
+                "BC_MSO",
+                "NONE",
+                "MERCURY",
+            )
 
-        positions *= u.km
+            positions *= u.km
 
-        # We want the positions in MSM' coordinates, not MSO', and must add
-        # 479 km to Z.
-        positions[:, 2] += Constants.DIPOLE_OFFSET_RADII
+            # We want the positions in MSM' coordinates, not MSO', and must add
+            # 479 km to Z.
+            positions[:, 2] += Constants.DIPOLE_OFFSET_RADII
 
-        # Convert to radii
-        positions = positions.to(Constants.MERCURY_RADIUS)
+            # Convert to radii
+            positions = positions.to(Constants.MERCURY_RADIUS)
 
-        positions_table = QTable(
-            positions,
-            names=["X MSM", "Y MSM", "Z MSM"],
-        )
+            positions_table = QTable(
+                positions,
+                names=["X MSM", "Y MSM", "Z MSM"],
+            )
 
-        positions_table["UTC"] = Time(times)
+            positions_table["UTC"] = Time(times)
 
-        positions_table = rotate_to_aberrated_coordinates(positions_table)
+            positions_table = rotate_to_aberrated_coordinates(positions_table)
 
-        return positions_table[["UTC", "X MSM'", "Y MSM'", "Z MSM'"]]
+            positions_table = positions_table[["UTC", "X MSM'", "Y MSM'", "Z MSM'"]]
+
+            tables.append(positions_table)
+
+        return tuple(tables)
 
 
 @dataclass
@@ -464,6 +443,7 @@ def plot_probabilities(
     axes[0, 0].legend(loc="upper center", ncols=3, bbox_to_anchor=(0.5, 1.3))
 
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def shift_range(direction):
