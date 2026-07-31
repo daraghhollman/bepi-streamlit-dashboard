@@ -127,10 +127,9 @@ def load_probability_maps(
 
     match author:
         case "Hollman+ 2026":
-            probability_map = xr.load_dataset(Path("./data/region_maps_hollman.nc"))
-
-        case "Philpott+ 2020":
-            probability_map = xr.load_dataset(Path("./data/region_maps_philpott.nc"))
+            probability_map = xr.load_dataset(
+                Path("./bepi-region-prediction/resources/region_probability_maps.nc")
+            )
 
         case _:
             raise ValueError(f"No valid author: {author}")
