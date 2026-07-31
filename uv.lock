@@ -226,7 +226,7 @@ dependencies = [
 requires-dist = [
     { name = "astropy", specifier = ">=7.2.0" },
     { name = "h5py", specifier = ">=3.15.1" },
-    { name = "hermpy", git = "https://github.com/daraghhollman/hermpy.git" },
+    { name = "hermpy", specifier = ">=0.2.7" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.0" },
@@ -699,7 +699,7 @@ wheels = [
 [[package]]
 name = "hermpy"
 version = "0.2.7"
-source = { git = "https://github.com/daraghhollman/hermpy.git#ab79056ab8f43aaa26db65425f78b0a8c5a3c49e" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bs4" },
     { name = "drms" },
@@ -714,6 +714,10 @@ dependencies = [
     { name = "sunpy" },
     { name = "xarray" },
     { name = "zeep" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1c/48/7484f604a1600328174d4edb7ffe3128904ef437b093d3dfd6c53f320eee/hermpy-0.2.7.tar.gz", hash = "sha256:e61a641530b3d0606012c7955d76e99c12326a32b8cebee2e118dc8efc45cc3c", size = 38246, upload-time = "2026-07-08T12:31:50.631Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/c1/923e381c4fe0863f7de5973abe3434dc7cd444481b1d7e85638f83f43e1e/hermpy-0.2.7-py3-none-any.whl", hash = "sha256:df7a21a2d651df0763c1e620cec9facac3ae2ad9e8a38f9e486487ef0275b755", size = 31783, upload-time = "2026-07-08T12:31:49.642Z" },
 ]
 
 [[package]]
